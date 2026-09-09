@@ -1,4 +1,5 @@
 import requests
+import os
 import time
 import json
 import base64
@@ -9,10 +10,10 @@ from zoneinfo import ZoneInfo
 API_URL = "https://juriscloud.es/api/incidents"
 LOGIN_URL = "https://juriscloud.es/api/auth/login"
 
-USERNAME = "Ariel"
-PASSWORD = "Ariel1234"
+USERNAME = os.getenv("JURISCLOUD_USERNAME")
+PASSWORD = os.getenv("JURISCLOUD_PASSWORD")
 
-TELEGRAM_BOT_TOKEN = "8901319101:AAFZ_RIr7wiDw3t848knUi2Jn-I1vAKLWvI"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = "787548988"
 
 CHECK_INTERVAL = 900  # 15 minutos
