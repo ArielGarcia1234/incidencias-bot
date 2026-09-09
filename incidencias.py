@@ -2,7 +2,8 @@ import requests
 import time
 import json
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 # ============== CONFIGURACIÓN ==============
 API_URL = "https://juriscloud.es/api/incidents"
@@ -14,7 +15,8 @@ PASSWORD = "Ariel1234"
 TELEGRAM_BOT_TOKEN = "8901319101:AAFZ_RIr7wiDw3t848knUi2Jn-I1vAKLWvI"
 TELEGRAM_CHAT_ID = "787548988"
 
-CHECK_INTERVAL = 120  # segundos (2 minutos). Cámbialo si quieres
+CHECK_INTERVAL = 900  # 15 minutos
+TIMEZONE = ZoneInfo("Europe/Madrid")
 # ===========================================
 
 token = None
@@ -36,7 +38,7 @@ def login():
             payload += '=' * (4 - len(payload) % 4)
             payload_data = json.loads(base64.urlsafe_b64decode(payload))
             token_exp = payload_data["exp"]
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Login correcto. Token válido hasta {datetime.fromtimestamp(token_exp).strftime('%H:%M:%S')}")
+            print(f"[{datetime.now(TIMEZONE).strftime('%H:%M:%S')}] Login correcto. Token válido hasta {datetime.fromtimestamp(token_exp, TIMEZONE).strftime('%H:%M:%S')}")
             return True
         else:
             print(f"Error en login: {r.status_code} - {r.text}")
@@ -92,53 +94,93 @@ def get_incidents():
 def format_incident(inc):
     title = inc.get("title", "Sin título")
     location = inc.get("location") or f"{inc.get('location_type_value', '')} - {inc.get('block_value', '')} - {inc.get('location_detail_value', '')}"
-    priority = str(inc.get("priority", "?")).upper()
     status = inc.get("status", "?")
     created = inc.get("created_at", "")[:16].replace("T", " ")
-
-    emoji = "🔴" if priority == "ALTA" else "🟡" if priority == "MEDIA" else "🟢"
+    
+    # Comentarios: primero notes, si no hay, description
+    comments = inc.get("notes") or inc.get("description") or "Sin comentarios"
 
     return (
-        f"{emoji} <b>Nueva incidencia</b>\n\n"
+        f"🔔 <b>Nueva incidencia</b>\n\n"
         f"<b>{title}</b>\n"
         f"📍 {location}\n"
-        f"⚡ Prioridad: {priority}\n"
+        f"💬 {comments}\n"
         f"📌 Estado: {status}\n"
         f"🕒 {created}"
     )
 
+def is_work_time(now):
+    """Devuelve True si es lunes-viernes entre 8:00 y 18:00"""
+    return now.weekday() < 5 and 8 <= now.hour < 18
+
+def seconds_until_next_work_time(now):
+    """Calcula cuántos segundos faltan hasta el próximo horario laboral"""
+    # Si estamos dentro del horario, no debería llamarse
+    target = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    
+    # Si ya pasó de las 18:00 o es fin de semana, buscar el próximo lunes/día laboral a las 8:00
+    if now.hour >= 18 or now.weekday() >= 5:
+        # Avanzar al siguiente día
+        days_ahead = 1
+        if now.weekday() == 4 and now.hour >= 18:  # Viernes después de las 18
+            days_ahead = 3  # Saltar al lunes
+        elif now.weekday() == 5:  # Sábado
+            days_ahead = 2  # Lunes
+        elif now.weekday() == 6:  # Domingo
+            days_ahead = 1  # Lunes
+        
+        target = (now + timedelta(days=days_ahead)).replace(hour=8, minute=0, second=0, microsecond=0)
+    
+    # Si es antes de las 8:00 de un día laboral
+    elif now.hour < 8:
+        target = now.replace(hour=8, minute=0, second=0, microsecond=0)
+    
+    delta = target - now
+    return max(int(delta.total_seconds()), 60)  # mínimo 60 segundos
+
 def main():
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Monitor de incidencias iniciado...")
+    print(f"[{datetime.now(TIMEZONE).strftime('%H:%M:%S')}] Monitor de incidencias iniciado...")
+    print("Horario: Lunes a Viernes de 08:00 a 18:00 (hora España)")
     
     if not login():
         print("No se pudo hacer login. Revisa usuario/contraseña.")
         return
 
-    # Carga inicial (no avisa de las que ya existen)
+    # Carga inicial
     incidents = get_incidents()
     for inc in incidents:
         seen_ids.add(inc["id"])
     print(f"Cargadas {len(seen_ids)} incidencias existentes. Esperando nuevas...\n")
 
     while True:
-        time.sleep(CHECK_INTERVAL)
+        now = datetime.now(TIMEZONE)
         
-        incidents = get_incidents()
-        new_ones = []
+        if is_work_time(now):
+            # Estamos en horario laboral → comprobar
+            incidents = get_incidents()
+            new_ones = []
 
-        for inc in incidents:
-            if inc["id"] not in seen_ids:
-                seen_ids.add(inc["id"])
-                new_ones.append(inc)
+            for inc in incidents:
+                if inc["id"] not in seen_ids:
+                    seen_ids.add(inc["id"])
+                    new_ones.append(inc)
 
-        if new_ones:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ¡{len(new_ones)} incidencia(s) nueva(s)!")
-            for inc in new_ones:
-                msg = format_incident(inc)
-                send_telegram(msg)
-                print(f"  → {inc.get('title')}")
+            if new_ones:
+                print(f"[{now.strftime('%H:%M:%S')}] ¡{len(new_ones)} incidencia(s) nueva(s)!")
+                for inc in new_ones:
+                    msg = format_incident(inc)
+                    send_telegram(msg)
+                    print(f"  → {inc.get('title')}")
+            else:
+                print(f"[{now.strftime('%H:%M:%S')}] Sin novedades ({len(seen_ids)} total)")
+            
+            time.sleep(CHECK_INTERVAL)
         else:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Sin novedades ({len(seen_ids)} total)")
+            # Fuera de horario → dormir hasta el próximo horario laboral
+            sleep_secs = seconds_until_next_work_time(now)
+            next_time = now + timedelta(seconds=sleep_secs)
+            print(f"[{now.strftime('%H:%M:%S')}] Fuera de horario. Durmiendo hasta {next_time.strftime('%A %H:%M')} ({sleep_secs//60} min)")
+            time.sleep(sleep_secs)
 
 if __name__ == "__main__":
     main()
